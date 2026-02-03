@@ -363,9 +363,9 @@ sqlite3 ~/.relayplane/data.db "SELECT * FROM routing_rules"
 
 ## Links
 
-- [Documentation](https://relayplane.com/integrations/openclaw)
+- [RelayPlane Proxy](https://relayplane.com/integrations/openclaw)
 - [GitHub](https://github.com/RelayPlane/proxy)
-- [RelayPlane SDK](https://github.com/RelayPlane/sdk)
+- [RelayPlane](https://relayplane.com/)
 
 ## License
 
