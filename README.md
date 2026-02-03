@@ -12,7 +12,7 @@ Intelligent AI model routing that cuts costs by 50-80% while maintaining quality
 >
 > - Set up billing alerts with your providers (Anthropic, OpenAI, etc.)
 > - Monitor usage through your provider's dashboard
-> - Use `/relayplane stats` or `curl localhost:3001/stats` to track usage
+> - Use `/relayplane stats` or `curl localhost:3001/control/stats` to track usage
 > - Start with test requests to understand routing behavior
 >
 > RelayPlane provides cost *optimization*, not cost *elimination*. You are responsible for monitoring your actual spending.
@@ -140,11 +140,11 @@ Unlike static routing rules, RelayPlane adapts to **your** usage patterns.
 
 | Provider | Models | Streaming | Tools |
 |----------|--------|-----------|-------|
-| **Anthropic** | Claude 4.5 (Opus, Sonnet, Haiku) | ✓ | ✓ |
-| **OpenAI** | GPT-5.2, GPT-5.2-Codex, o1, o3 | ✓ | ✓ |
-| **Google** | Gemini 2.0 Flash, 2.0 Pro | ✓ | ✓ |
-| **xAI** | Grok-3, Grok-3-mini | ✓ | ✓ |
-| **Moonshot** | v1-8k, v1-32k, v1-128k | ✓ | ✓ |
+| **Anthropic** | Claude 3.5 Haiku, Sonnet 4, Opus 4.5 | ✓ | ✓ |
+| **OpenAI** | GPT-4o, GPT-4o-mini, GPT-4.1, o1, o3 | ✓ | ✓ |
+| **Google** | Gemini 2.0 Flash, Gemini Pro | ✓ | ✓ |
+| **xAI** | Grok (grok-*) | ✓ | ✓ |
+| **Moonshot** | Moonshot v1 (8k, 32k, 128k) | ✓ | ✓ |
 
 ## Routing Modes
 
@@ -208,74 +208,71 @@ Options:
 
 ## REST API
 
-The proxy exposes endpoints for stats and monitoring:
+The proxy exposes control endpoints for stats and monitoring:
 
-### `GET /health`
+### `GET /control/status`
 
-Server health and version info.
+Proxy status and current configuration.
 
 ```bash
-curl http://localhost:3001/health
+curl http://localhost:3001/control/status
 ```
 
 ```json
 {
-  "status": "ok",
-  "version": "0.1.7",
-  "uptime": "2h 15m 30s",
-  "providers": { "anthropic": true, "openai": true, "google": false },
-  "totalRuns": 142
+  "enabled": true,
+  "mode": "cascade",
+  "modelOverrides": {}
 }
 ```
 
-### `GET /stats`
+### `GET /control/stats`
 
-Aggregated statistics and cost savings.
+Aggregated statistics and routing counts.
 
 ```bash
-curl http://localhost:3001/stats
+curl http://localhost:3001/control/stats
 ```
 
 ```json
 {
-  "totalRuns": 142,
-  "savings": {
-    "estimatedSavingsPercent": "73.2%",
-    "actualCostUsd": "0.0234",
-    "baselineCostUsd": "0.0873",
-    "savedUsd": "0.0639"
+  "uptimeMs": 3600000,
+  "uptimeFormatted": "60m 0s",
+  "totalRequests": 142,
+  "successfulRequests": 138,
+  "failedRequests": 4,
+  "successRate": "97.2%",
+  "avgLatencyMs": 1203,
+  "escalations": 12,
+  "routingCounts": {
+    "auto": 100,
+    "cost": 30,
+    "passthrough": 12
   },
-  "modelDistribution": {
-    "anthropic/claude-3-5-haiku-latest": { "count": 98, "percentage": "69.0%" },
-    "anthropic/claude-sonnet-4-20250514": { "count": 44, "percentage": "31.0%" }
+  "modelCounts": {
+    "anthropic/claude-3-5-haiku-latest": 98,
+    "anthropic/claude-sonnet-4-20250514": 44
   }
 }
 ```
 
-### `GET /runs`
+### `POST /control/enable` / `POST /control/disable`
 
-Recent routing decisions.
+Enable or disable routing (passthrough mode when disabled).
 
 ```bash
-curl "http://localhost:3001/runs?limit=10"
+curl -X POST http://localhost:3001/control/enable
+curl -X POST http://localhost:3001/control/disable
 ```
 
-```json
-{
-  "runs": [
-    {
-      "runId": "abc123",
-      "timestamp": "2026-02-03T13:26:03Z",
-      "model": "anthropic/claude-3-5-haiku-latest",
-      "taskType": "code_generation",
-      "confidence": 0.92,
-      "mode": "auto",
-      "durationMs": 1203,
-      "promptPreview": "Write a function that..."
-    }
-  ],
-  "total": 142
-}
+### `POST /control/config`
+
+Update configuration (hot-reload, merges with existing).
+
+```bash
+curl -X POST http://localhost:3001/control/config \
+  -H "Content-Type: application/json" \
+  -d '{"routing": {"mode": "cascade"}}'
 ```
 
 ## Configuration
@@ -284,46 +281,71 @@ RelayPlane creates a config file on first run at `~/.relayplane/config.json`:
 
 ```json
 {
-  "strategies": {
-    "code_review": { "model": "anthropic:claude-sonnet-4-20250514" },
-    "code_generation": { "model": "anthropic:claude-3-5-haiku-latest" },
-    "analysis": { "model": "anthropic:claude-sonnet-4-20250514" },
-    "summarization": { "model": "anthropic:claude-3-5-haiku-latest" },
-    "creative_writing": { "model": "anthropic:claude-sonnet-4-20250514" },
-    "data_extraction": { "model": "anthropic:claude-3-5-haiku-latest" },
-    "translation": { "model": "anthropic:claude-3-5-haiku-latest" },
-    "question_answering": { "model": "anthropic:claude-3-5-haiku-latest" },
-    "general": { "model": "anthropic:claude-3-5-haiku-latest" }
+  "enabled": true,
+  "routing": {
+    "mode": "cascade",
+    "cascade": {
+      "enabled": true,
+      "models": [
+        "claude-3-haiku-20240307",
+        "claude-3-5-sonnet-20241022",
+        "claude-3-opus-20240229"
+      ],
+      "escalateOn": "uncertainty",
+      "maxEscalations": 1
+    },
+    "complexity": {
+      "enabled": true,
+      "simple": "claude-3-haiku-20240307",
+      "moderate": "claude-3-5-sonnet-20241022",
+      "complex": "claude-3-opus-20240229"
+    }
   },
-  "defaults": {
-    "qualityModel": "claude-sonnet-4-20250514",
-    "costModel": "claude-3-5-haiku-latest"
-  }
+  "reliability": {
+    "cooldowns": {
+      "enabled": true,
+      "allowedFails": 3,
+      "windowSeconds": 60,
+      "cooldownSeconds": 120
+    }
+  },
+  "modelOverrides": {}
 }
 ```
 
 **Edit and save — changes apply instantly** (hot-reload, no restart needed).
 
-### Strategy Options
+### Configuration Options
 
 | Field | Description |
 |-------|-------------|
-| `model` | Provider and model in format `provider:model` |
-| `minConfidence` | Optional. Only use this strategy if confidence >= threshold |
-| `fallback` | Optional. Fallback model if primary fails |
+| `enabled` | Enable/disable routing (false = passthrough mode) |
+| `routing.mode` | `"cascade"` or `"standard"` |
+| `routing.cascade.models` | Ordered list of models to try (cheapest first) |
+| `routing.cascade.escalateOn` | When to escalate: `"uncertainty"`, `"refusal"`, or `"error"` |
+| `routing.complexity.simple/moderate/complex` | Models for each complexity level |
+| `reliability.cooldowns` | Auto-disable failing providers temporarily |
+| `modelOverrides` | Map input model names to different targets |
 
 ### Examples
 
-Route all analysis tasks to GPT-4o:
+Use GPT-4o for complex tasks:
 ```json
-"analysis": { "model": "openai:gpt-4o" }
+{
+  "routing": {
+    "complexity": {
+      "complex": "gpt-4o"
+    }
+  }
+}
 ```
 
-Use Opus for code review with fallback:
+Override a specific model:
 ```json
-"code_review": { 
-  "model": "anthropic:claude-opus-4-5-20250514",
-  "fallback": "anthropic:claude-sonnet-4-20250514"
+{
+  "modelOverrides": {
+    "claude-3-opus": "claude-3-5-sonnet-20241022"
+  }
 }
 ```
 
