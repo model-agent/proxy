@@ -17,11 +17,11 @@ import * as http from 'node:http';
 import * as url from 'node:url';
 import { RelayPlane } from './relay.js';
 import { inferTaskType, getInferenceConfidence } from './routing/inference.js';
-import { loadConfig, watchConfig, getStrategy, type Config } from './config.js';
+import { loadConfig, watchConfig, getStrategy, getAnthropicAuth, type Config } from './config.js';
 import type { Provider, TaskType } from './types.js';
 
 /** Package version */
-const VERSION = '0.1.8';
+const VERSION = '0.1.9';
 
 /** Recent runs buffer for /runs endpoint */
 interface RecentRun {
@@ -165,21 +165,35 @@ function extractPromptText(messages: ChatRequest['messages']): string {
 }
 
 /**
+ * Auth info for Anthropic requests
+ */
+interface AnthropicAuth {
+  type: 'apiKey' | 'max';
+  value: string;
+}
+
+/**
  * Forward non-streaming request to Anthropic API
  */
 async function forwardToAnthropic(
   request: ChatRequest,
   targetModel: string,
-  apiKey: string,
+  auth: AnthropicAuth,
   betaHeaders?: string
 ): Promise<Response> {
   const anthropicBody = buildAnthropicBody(request, targetModel, false);
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'x-api-key': apiKey,
     'anthropic-version': '2023-06-01',
   };
+
+  // Use appropriate auth header based on type
+  if (auth.type === 'max') {
+    headers['Authorization'] = `Bearer ${auth.value}`;
+  } else {
+    headers['x-api-key'] = auth.value;
+  }
 
   // Pass through beta headers (prompt caching, extended thinking, etc.)
   if (betaHeaders) {
@@ -201,16 +215,22 @@ async function forwardToAnthropic(
 async function forwardToAnthropicStream(
   request: ChatRequest,
   targetModel: string,
-  apiKey: string,
+  auth: AnthropicAuth,
   betaHeaders?: string
 ): Promise<Response> {
   const anthropicBody = buildAnthropicBody(request, targetModel, true);
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'x-api-key': apiKey,
     'anthropic-version': '2023-06-01',
   };
+
+  // Use appropriate auth header based on type
+  if (auth.type === 'max') {
+    headers['Authorization'] = `Bearer ${auth.value}`;
+  } else {
+    headers['x-api-key'] = auth.value;
+  }
 
   if (betaHeaders) {
     headers['anthropic-beta'] = betaHeaders;
@@ -1419,14 +1439,29 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
 
     log(`Routing to: ${targetProvider}/${targetModel}`);
 
-    // Get API key for target provider
-    const apiKeyEnv = DEFAULT_ENDPOINTS[targetProvider]?.apiKeyEnv ?? `${targetProvider.toUpperCase()}_API_KEY`;
-    const apiKey = process.env[apiKeyEnv];
+    // Get auth for target provider
+    let apiKey: string | undefined;
+    let anthropicAuth: { type: 'apiKey' | 'max'; value: string } | null = null;
 
-    if (!apiKey) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: `Missing ${apiKeyEnv} environment variable` }));
-      return;
+    if (targetProvider === 'anthropic') {
+      // Use hybrid auth system for Anthropic (supports MAX + API key)
+      anthropicAuth = getAnthropicAuth(currentConfig, targetModel);
+      if (!anthropicAuth) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'No Anthropic auth configured (set ANTHROPIC_API_KEY or config.auth.anthropicMaxToken)' }));
+        return;
+      }
+      log(`Using ${anthropicAuth.type === 'max' ? 'MAX token' : 'API key'} auth for ${targetModel}`);
+    } else {
+      // Standard API key auth for other providers
+      const apiKeyEnv = DEFAULT_ENDPOINTS[targetProvider]?.apiKeyEnv ?? `${targetProvider.toUpperCase()}_API_KEY`;
+      apiKey = process.env[apiKeyEnv];
+
+      if (!apiKey) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: `Missing ${apiKeyEnv} environment variable` }));
+        return;
+      }
     }
 
     const startTime = Date.now();
@@ -1442,6 +1477,7 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
         targetProvider,
         targetModel,
         apiKey,
+        anthropicAuth,
         relay,
         promptText,
         taskType,
@@ -1458,6 +1494,7 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
         targetProvider,
         targetModel,
         apiKey,
+        anthropicAuth,
         relay,
         promptText,
         taskType,
@@ -1499,7 +1536,8 @@ async function handleStreamingRequest(
   request: ChatRequest,
   targetProvider: Provider,
   targetModel: string,
-  apiKey: string,
+  apiKey: string | undefined,
+  anthropicAuth: { type: 'apiKey' | 'max'; value: string } | null,
   relay: RelayPlane,
   promptText: string,
   taskType: TaskType,
@@ -1514,19 +1552,20 @@ async function handleStreamingRequest(
   try {
     switch (targetProvider) {
       case 'anthropic':
-        providerResponse = await forwardToAnthropicStream(request, targetModel, apiKey, betaHeaders);
+        if (!anthropicAuth) throw new Error('No Anthropic auth');
+        providerResponse = await forwardToAnthropicStream(request, targetModel, anthropicAuth, betaHeaders);
         break;
       case 'google':
-        providerResponse = await forwardToGeminiStream(request, targetModel, apiKey);
+        providerResponse = await forwardToGeminiStream(request, targetModel, apiKey!);
         break;
       case 'xai':
-        providerResponse = await forwardToXAIStream(request, targetModel, apiKey);
+        providerResponse = await forwardToXAIStream(request, targetModel, apiKey!);
         break;
       case 'moonshot':
-        providerResponse = await forwardToMoonshotStream(request, targetModel, apiKey);
+        providerResponse = await forwardToMoonshotStream(request, targetModel, apiKey!);
         break;
       default:
-        providerResponse = await forwardToOpenAIStream(request, targetModel, apiKey);
+        providerResponse = await forwardToOpenAIStream(request, targetModel, apiKey!);
     }
 
     if (!providerResponse.ok) {
@@ -1619,7 +1658,8 @@ async function handleNonStreamingRequest(
   request: ChatRequest,
   targetProvider: Provider,
   targetModel: string,
-  apiKey: string,
+  apiKey: string | undefined,
+  anthropicAuth: { type: 'apiKey' | 'max'; value: string } | null,
   relay: RelayPlane,
   promptText: string,
   taskType: TaskType,
@@ -1635,7 +1675,8 @@ async function handleNonStreamingRequest(
   try {
     switch (targetProvider) {
       case 'anthropic': {
-        providerResponse = await forwardToAnthropic(request, targetModel, apiKey, betaHeaders);
+        if (!anthropicAuth) throw new Error('No Anthropic auth');
+        providerResponse = await forwardToAnthropic(request, targetModel, anthropicAuth, betaHeaders);
         const rawData = (await providerResponse.json()) as AnthropicResponse;
 
         if (!providerResponse.ok) {
@@ -1649,7 +1690,7 @@ async function handleNonStreamingRequest(
         break;
       }
       case 'google': {
-        providerResponse = await forwardToGemini(request, targetModel, apiKey);
+        providerResponse = await forwardToGemini(request, targetModel, apiKey!);
         const rawData = (await providerResponse.json()) as GeminiResponse;
 
         if (!providerResponse.ok) {
@@ -1663,7 +1704,7 @@ async function handleNonStreamingRequest(
         break;
       }
       case 'xai': {
-        providerResponse = await forwardToXAI(request, targetModel, apiKey);
+        providerResponse = await forwardToXAI(request, targetModel, apiKey!);
         responseData = (await providerResponse.json()) as Record<string, unknown>;
 
         if (!providerResponse.ok) {
@@ -1674,7 +1715,7 @@ async function handleNonStreamingRequest(
         break;
       }
       case 'moonshot': {
-        providerResponse = await forwardToMoonshot(request, targetModel, apiKey);
+        providerResponse = await forwardToMoonshot(request, targetModel, apiKey!);
         responseData = (await providerResponse.json()) as Record<string, unknown>;
 
         if (!providerResponse.ok) {
@@ -1685,7 +1726,7 @@ async function handleNonStreamingRequest(
         break;
       }
       default: {
-        providerResponse = await forwardToOpenAI(request, targetModel, apiKey);
+        providerResponse = await forwardToOpenAI(request, targetModel, apiKey!);
         responseData = (await providerResponse.json()) as Record<string, unknown>;
 
         if (!providerResponse.ok) {

@@ -297,6 +297,25 @@ Use Opus for code review with fallback:
 }
 ```
 
+### Hybrid Auth (MAX + API Key)
+
+If you have a MAX subscription, you can use MAX for Opus and API keys for cheaper models:
+
+```json
+{
+  "auth": {
+    "anthropicMaxToken": "your-max-token-here",
+    "useMaxForModels": ["opus"]
+  }
+}
+```
+
+This routes:
+- **Opus requests** → MAX token (already paid for)
+- **Haiku/Sonnet requests** → API key (pay per token)
+
+Best of both worlds: unlimited Opus via MAX, cheap Haiku for simple tasks.
+
 ## Data Storage
 
 All data stored locally at `~/.relayplane/data.db` (SQLite).

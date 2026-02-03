@@ -22,6 +22,15 @@ const StrategySchema = z.object({
 });
 
 /**
+ * Auth configuration for hybrid API key / MAX token support
+ */
+const AuthSchema = z.object({
+  anthropicApiKey: z.string().optional(),
+  anthropicMaxToken: z.string().optional(),
+  useMaxForModels: z.array(z.string()).optional(), // Default: ['opus']
+}).optional();
+
+/**
  * Full config schema
  */
 const ConfigSchema = z.object({
@@ -30,6 +39,7 @@ const ConfigSchema = z.object({
     qualityModel: z.string().optional(),
     costModel: z.string().optional(),
   }).optional(),
+  auth: AuthSchema,
 });
 
 export type StrategyConfig = z.infer<typeof StrategySchema>;
@@ -116,6 +126,34 @@ export function loadConfig(): Config {
  */
 export function getStrategy(config: Config, taskType: TaskType): StrategyConfig | null {
   return config.strategies?.[taskType] ?? null;
+}
+
+/**
+ * Determine which Anthropic auth to use based on model
+ * Returns: { type: 'apiKey' | 'max', value: string } or null if no auth configured
+ */
+export function getAnthropicAuth(
+  config: Config,
+  model: string
+): { type: 'apiKey' | 'max'; value: string } | null {
+  const auth = config.auth;
+  
+  // Check if this model should use MAX
+  const useMaxForModels = auth?.useMaxForModels ?? ['opus'];
+  const shouldUseMax = useMaxForModels.some(m => model.toLowerCase().includes(m.toLowerCase()));
+  
+  // If MAX token configured and model matches, use MAX
+  if (shouldUseMax && auth?.anthropicMaxToken) {
+    return { type: 'max', value: auth.anthropicMaxToken };
+  }
+  
+  // Otherwise use API key from config or env
+  const apiKey = auth?.anthropicApiKey ?? process.env['ANTHROPIC_API_KEY'];
+  if (apiKey) {
+    return { type: 'apiKey', value: apiKey };
+  }
+  
+  return null;
 }
 
 /**
