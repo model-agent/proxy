@@ -12,7 +12,7 @@ Intelligent AI model routing that cuts costs by 50-80% while maintaining quality
 >
 > - Set up billing alerts with your providers (Anthropic, OpenAI, etc.)
 > - Monitor usage through your provider's dashboard
-> - Check `/stats` endpoint to track request volume
+> - Use `/relayplane stats` or `curl localhost:3001/stats` to track usage
 > - Start with test requests to understand routing behavior
 >
 > RelayPlane provides cost *optimization*, not cost *elimination*. You are responsible for monitoring your actual spending.
@@ -50,6 +50,23 @@ npx @relayplane/proxy stats --days 30
 
 # Show help
 npx @relayplane/proxy --help
+```
+
+## OpenClaw Slash Commands
+
+If you're using OpenClaw, these chat commands are available:
+
+| Command | Description |
+|---------|-------------|
+| `/relayplane stats` | Show usage statistics and cost savings |
+| `/relayplane status` | Show proxy health and configuration |
+| `/relayplane switch <mode>` | Change routing mode (auto\|cost\|fast\|quality) |
+| `/relayplane models` | List available routing models |
+
+Example:
+```
+/relayplane stats
+/relayplane switch cost
 ```
 
 ## Quick Start
