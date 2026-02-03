@@ -57,11 +57,31 @@ Your Tool (OpenClaw, Cursor, etc.)
     ├── Infers task type (code_review, analysis, etc.)
     ├── Checks routing rules
     ├── Selects optimal model (Haiku for simple, Opus for complex)
-    └── Tracks outcomes for learning
+    ├── Tracks outcomes (success/failure/latency)
+    └── Learns patterns → improves over time
          │
          ▼
     Provider (Anthropic, OpenAI, etc.)
 ```
+
+## Learning & Adaptation
+
+RelayPlane doesn't just route — it **learns from every request**:
+
+- **Outcome Tracking** — Records success/failure for each route decision
+- **Pattern Detection** — Identifies what works for your specific codebase
+- **Continuous Improvement** — Routing gets smarter the more you use it
+- **Local Intelligence** — All learning happens in your local SQLite DB
+
+```bash
+# View your routing stats
+npx @relayplane/proxy stats
+
+# Query the raw data
+sqlite3 ~/.relayplane/data.db "SELECT model, outcome, COUNT(*) FROM runs GROUP BY model, outcome"
+```
+
+Unlike static routing rules, RelayPlane adapts to **your** usage patterns.
 
 ## Supported Providers
 
