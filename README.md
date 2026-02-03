@@ -4,6 +4,7 @@
 
 Intelligent AI model routing that cuts costs by 50-80% while maintaining quality.
 
+[![CI](https://github.com/RelayPlane/proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/RelayPlane/proxy/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/@relayplane/proxy)](https://www.npmjs.com/package/@relayplane/proxy)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
