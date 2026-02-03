@@ -20,6 +20,25 @@ Or run directly:
 npx @relayplane/proxy
 ```
 
+## CLI Commands
+
+```bash
+# Start the proxy server
+npx @relayplane/proxy
+
+# Start on custom port
+npx @relayplane/proxy --port 8080
+
+# View routing statistics
+npx @relayplane/proxy stats
+
+# View stats for last 30 days
+npx @relayplane/proxy stats --days 30
+
+# Show help
+npx @relayplane/proxy --help
+```
+
 ## Quick Start
 
 ### 1. Set your API keys
