@@ -12,7 +12,7 @@
  * import { startProxy } from '@relayplane/proxy';
  *
  * // Start the proxy server
- * await startProxy({ port: 3001 });
+ * await startProxy({ port: 4801 });
  * ```
  *
  * @packageDocumentation

@@ -15,7 +15,7 @@
  *   config                 Show configuration
  * 
  * Options:
- *   --port <number>    Port to listen on (default: 3001)
+ *   --port <number>    Port to listen on (default: 4801)
  *   --host <string>    Host to bind to (default: 127.0.0.1)
  *   --offline          Disable all network calls except LLM endpoints
  *   --audit            Show telemetry payloads before sending
@@ -69,7 +69,7 @@ Commands:
   config                 Show configuration
 
 Options:
-  --port <number>    Port to listen on (default: 3001)
+  --port <number>    Port to listen on (default: 4801)
   --host <string>    Host to bind to (default: 127.0.0.1)
   --offline          Disable all network calls except LLM endpoints
   --audit            Show telemetry payloads before sending
@@ -98,8 +98,8 @@ Example:
   npx @relayplane/proxy telemetry off
 
   # Then point your SDKs to the proxy
-  export ANTHROPIC_BASE_URL=http://localhost:3001
-  export OPENAI_BASE_URL=http://localhost:3001
+  export ANTHROPIC_BASE_URL=http://localhost:4801
+  export OPENAI_BASE_URL=http://localhost:4801
 
 Learn more: https://relayplane.com/docs
 `);
@@ -238,7 +238,7 @@ async function main(): Promise<void> {
   }
 
   // Parse server options
-  let port = 3001;
+  let port = 4801;
   let host = '127.0.0.1';
   let verbose = false;
   let audit = false;

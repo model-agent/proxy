@@ -316,10 +316,10 @@ export function getTelemetryPath(): string {
 
 const BRAIN_API_URL = process.env.RELAYPLANE_API_URL || 'https://api.relayplane.com';
 const UPLOAD_BATCH_SIZE = 50;
-const UPLOAD_INTERVAL_MS = 60000; // 1 minute
+const FLUSH_DELAY_MS = 5000; // 5 second debounce
 
 let uploadQueue: TelemetryEvent[] = [];
-let uploadTimer: ReturnType<typeof setTimeout> | null = null;
+let flushTimeout: ReturnType<typeof setTimeout> | null = null;
 
 /**
  * Queue an event for cloud upload
@@ -329,44 +329,51 @@ export function queueForUpload(event: TelemetryEvent): void {
   
   uploadQueue.push(event);
   
-  // Flush if batch is full
+  // Flush immediately if batch is full
   if (uploadQueue.length >= UPLOAD_BATCH_SIZE) {
-    flushTelemetryToCloud().catch(err => {
-      console.error('[Telemetry] Failed to flush batch:', err);
-    });
+    flushTelemetryToCloud().catch(() => {});
+    return;
   }
   
-  // Start periodic flush timer if not running
-  if (!uploadTimer) {
-    uploadTimer = setInterval(() => {
-      flushTelemetryToCloud().catch(err => {
-        console.error('[Telemetry] Periodic flush failed:', err);
-      });
-    }, UPLOAD_INTERVAL_MS);
-  }
+  // Otherwise debounce: flush 5s after last event (batches rapid-fire calls)
+  if (flushTimeout) clearTimeout(flushTimeout);
+  flushTimeout = setTimeout(() => {
+    flushTimeout = null;
+    flushTelemetryToCloud().catch(() => {});
+  }, FLUSH_DELAY_MS);
 }
 
 /**
  * Flush queued telemetry to cloud
+ * Uses authenticated endpoint if API key available, otherwise anonymous endpoint
  */
 export async function flushTelemetryToCloud(): Promise<void> {
   if (offlineMode || uploadQueue.length === 0) return;
   
   const apiKey = getApiKey();
-  if (!apiKey) {
-    // No API key, can't upload
-    return;
-  }
   
-  const batch = uploadQueue.splice(0, UPLOAD_BATCH_SIZE);
+  // Use anonymous endpoint for free tier, authenticated for Pro
+  const endpoint = apiKey 
+    ? `${BRAIN_API_URL}/v1/telemetry`
+    : `${BRAIN_API_URL}/v1/telemetry/anonymous`;
+  
+  // Anonymous uploads have smaller batch limit (100 vs 1000)
+  const batchSize = apiKey ? UPLOAD_BATCH_SIZE : Math.min(UPLOAD_BATCH_SIZE, 100);
+  const batch = uploadQueue.splice(0, batchSize);
   
   try {
-    const response = await fetch(`${BRAIN_API_URL}/v1/telemetry`, {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    
+    // Only add auth header if we have an API key
+    if (apiKey) {
+      headers['Authorization'] = `Bearer ${apiKey}`;
+    }
+    
+    const response = await fetch(endpoint, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
+      headers,
       body: JSON.stringify({
         schemaVersion: '1.0',
         events: batch,
@@ -413,10 +420,12 @@ function getApiKey(): string | null {
  * Stop upload timer (for cleanup)
  */
 export function stopUploadTimer(): void {
-  if (uploadTimer) {
-    clearInterval(uploadTimer);
-    uploadTimer = null;
+  if (flushTimeout) {
+    clearTimeout(flushTimeout);
+    flushTimeout = null;
   }
+  // Final flush on shutdown
+  flushTelemetryToCloud().catch(() => {});
 }
 
 /**

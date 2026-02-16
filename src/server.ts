@@ -167,7 +167,7 @@ export class ProxyServer {
 
   constructor(config: ProxyServerConfig = {}) {
     this.config = {
-      port: config.port ?? 3001,
+      port: config.port ?? 4801,
       host: config.host ?? '127.0.0.1',
       verbose: config.verbose ?? false,
       defaultWorkspaceId: config.defaultWorkspaceId ?? 'default',

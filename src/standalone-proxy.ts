@@ -26,6 +26,7 @@ import * as path from 'node:path';
 import { RelayPlane, inferTaskType, getInferenceConfidence } from '@relayplane/core';
 import type { Provider, TaskType } from '@relayplane/core';
 import { buildModelNotFoundError } from './utils/model-suggestions.js';
+import { recordTelemetry as recordCloudTelemetry, inferTaskType as inferTelemetryTaskType, estimateCost } from './telemetry.js';
 
 /**
  * Provider endpoint configuration
@@ -66,13 +67,13 @@ export const DEFAULT_ENDPOINTS: Record<string, ProviderEndpoint> = {
  */
 export const MODEL_MAPPING: Record<string, { provider: Provider; model: string }> = {
   // Anthropic models (using correct API model IDs)
-  'claude-opus-4-5': { provider: 'anthropic', model: 'claude-opus-4-5-20250514' },
+  'claude-opus-4-5': { provider: 'anthropic', model: 'claude-opus-4-20250514' },
   'claude-sonnet-4': { provider: 'anthropic', model: 'claude-sonnet-4-20250514' },
   'claude-3-5-sonnet': { provider: 'anthropic', model: 'claude-3-5-sonnet-20241022' },
   'claude-3-5-haiku': { provider: 'anthropic', model: 'claude-3-5-haiku-20241022' },
   haiku: { provider: 'anthropic', model: 'claude-3-5-haiku-20241022' },
   sonnet: { provider: 'anthropic', model: 'claude-sonnet-4-20250514' },
-  opus: { provider: 'anthropic', model: 'claude-opus-4-5-20250514' },
+  opus: { provider: 'anthropic', model: 'claude-opus-4-20250514' },
   // OpenAI models
   'gpt-4o': { provider: 'openai', model: 'gpt-4o' },
   'gpt-4o-mini': { provider: 'openai', model: 'gpt-4o-mini' },
@@ -101,6 +102,35 @@ export const SMART_ALIASES: Record<string, { provider: Provider; model: string }
   // Balanced model for general use (good quality/cost tradeoff)
   'rp:balanced': { provider: 'anthropic', model: 'claude-3-5-haiku-20241022' },
 };
+
+/**
+ * Send a telemetry event to the cloud (anonymous or authenticated).
+ * Non-blocking — errors are silently swallowed.
+ */
+function sendCloudTelemetry(
+  taskType: string,
+  model: string,
+  tokensIn: number,
+  tokensOut: number,
+  latencyMs: number,
+  success: boolean,
+  costUsd?: number,
+): void {
+  try {
+    const cost = costUsd ?? estimateCost(model, tokensIn, tokensOut);
+    recordCloudTelemetry({
+      task_type: taskType,
+      model,
+      tokens_in: tokensIn,
+      tokens_out: tokensOut,
+      latency_ms: Math.round(latencyMs),
+      success,
+      cost_usd: cost,
+    });
+  } catch {
+    // Telemetry should never break the proxy
+  }
+}
 
 /**
  * Get all available model names for error suggestions
@@ -386,7 +416,7 @@ const DEFAULT_PROXY_CONFIG: RelayPlaneProxyConfigFile = {
       models: [
         'claude-3-5-haiku-20241022',
         'claude-sonnet-4-20250514',
-        'claude-opus-4-5-20250514',
+        'claude-opus-4-20250514',
       ],
       escalateOn: 'uncertainty',
       maxEscalations: 1,
@@ -395,7 +425,7 @@ const DEFAULT_PROXY_CONFIG: RelayPlaneProxyConfigFile = {
       enabled: true,
       simple: 'claude-3-5-haiku-20241022',
       moderate: 'claude-sonnet-4-20250514',
-      complex: 'claude-opus-4-5-20250514',
+      complex: 'claude-opus-4-20250514',
     },
   },
   reliability: {
@@ -545,6 +575,7 @@ interface ChatRequest {
  * Extract text content from messages for routing analysis
  */
 function extractPromptText(messages: ChatRequest['messages']): string {
+  if (!messages || !Array.isArray(messages)) return '';
   return messages
     .map((msg) => {
       if (typeof msg.content === 'string') return msg.content;
@@ -1868,7 +1899,7 @@ function getCascadeConfig(config: RelayPlaneProxyConfigFile): CascadeConfig {
   const c = config.routing?.cascade;
   return {
     enabled: c?.enabled ?? true,
-    models: c?.models ?? ['claude-3-5-haiku-20241022', 'claude-sonnet-4-20250514', 'claude-opus-4-5-20250514'],
+    models: c?.models ?? ['claude-3-5-haiku-20241022', 'claude-sonnet-4-20250514', 'claude-opus-4-20250514'],
     escalateOn: c?.escalateOn ?? 'uncertainty',
     maxEscalations: c?.maxEscalations ?? 1,
   };
@@ -1956,7 +1987,7 @@ async function cascadeRequest(
  * Start the RelayPlane proxy server
  */
 export async function startProxy(config: ProxyConfig = {}): Promise<http.Server> {
-  const port = config.port ?? 3001;
+  const port = config.port ?? 4801;
   const host = config.host ?? '127.0.0.1';
   const verbose = config.verbose ?? false;
   const anthropicAuthMode = config.anthropicAuth ?? 'auto';
@@ -2017,6 +2048,31 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
 
     const url = req.url ?? '';
     const pathname = url.split('?')[0] ?? '';
+
+    // === Health endpoint ===
+    if (req.method === 'GET' && (pathname === '/health' || pathname === '/healthz')) {
+      const uptimeMs = Date.now() - globalStats.startedAt;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        status: 'ok',
+        version: '1.1.3',
+        uptime: Math.floor(uptimeMs / 1000),
+        uptimeMs,
+        requests: globalStats.totalRequests,
+        successRate: globalStats.totalRequests > 0
+          ? parseFloat(((globalStats.successfulRequests / globalStats.totalRequests) * 100).toFixed(1))
+          : null,
+        stats: {
+          totalRequests: globalStats.totalRequests,
+          successfulRequests: globalStats.successfulRequests,
+          failedRequests: globalStats.failedRequests,
+          escalations: globalStats.escalations,
+          routingCounts: globalStats.routingCounts,
+          modelCounts: globalStats.modelCounts,
+        },
+      }));
+      return;
+    }
 
     // === Control endpoints ===
     if (pathname.startsWith('/control/')) {
@@ -2313,6 +2369,7 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
       }
 
       const startTime = Date.now();
+      let nativeResponseData: Record<string, unknown> | undefined;
 
       try {
         if (useCascade && cascadeConfig) {
@@ -2402,9 +2459,9 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
             }
             res.end();
           } else {
-            const responseData = await providerResponse.json();
+            nativeResponseData = await providerResponse.json() as Record<string, unknown>;
             res.writeHead(providerResponse.status, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify(responseData));
+            res.end(JSON.stringify(nativeResponseData));
           }
         }
 
@@ -2427,6 +2484,10 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
               model: `${targetProvider}:${targetModel || requestedModel}`,
             })
             .catch(() => {});
+          const usage = (nativeResponseData as any)?.usage;
+          const tokensIn = usage?.input_tokens ?? usage?.prompt_tokens ?? 0;
+          const tokensOut = usage?.output_tokens ?? usage?.completion_tokens ?? 0;
+          sendCloudTelemetry(taskType, targetModel || requestedModel, tokensIn, tokensOut, durationMs, true);
         }
       } catch (err) {
         const durationMs = Date.now() - startTime;
@@ -2538,6 +2599,12 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
     if (!requestedModel) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Missing model in request' }));
+      return;
+    }
+
+    if (!request.messages || !Array.isArray(request.messages)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Missing or invalid messages array in request' }));
       return;
     }
 
@@ -2809,6 +2876,10 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
             } catch (err) {
               log(`Failed to record run: ${err}`);
             }
+            const usage = (responseData as any)?.usage;
+            const tokensIn = usage?.input_tokens ?? usage?.prompt_tokens ?? 0;
+            const tokensOut = usage?.output_tokens ?? usage?.completion_tokens ?? 0;
+            sendCloudTelemetry(taskType, cascadeResult.model, tokensIn, tokensOut, durationMs, true);
           }
 
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -3033,6 +3104,7 @@ async function handleStreamingRequest(
       .catch((err) => {
         log(`Failed to record run: ${err}`);
       });
+    sendCloudTelemetry(taskType, targetModel, 0, 0, durationMs, true);
   }
 
   res.end();
@@ -3117,6 +3189,11 @@ async function handleNonStreamingRequest(
     } catch (err) {
       log(`Failed to record run: ${err}`);
     }
+    // Extract token counts from response if available (Anthropic/OpenAI format)
+    const usage = (responseData as any)?.usage;
+    const tokensIn = usage?.input_tokens ?? usage?.prompt_tokens ?? 0;
+    const tokensOut = usage?.output_tokens ?? usage?.completion_tokens ?? 0;
+    sendCloudTelemetry(taskType, targetModel, tokensIn, tokensOut, durationMs, true);
   }
 
   // Send response

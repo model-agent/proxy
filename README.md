@@ -32,7 +32,7 @@ relayplane-proxy
 # Add to your OpenClaw config (config.yaml)
 # providers:
 #   anthropic:
-#     baseUrl: http://localhost:3001
+#     baseUrl: http://localhost:4801
 ```
 
 ## How It Works
@@ -63,7 +63,7 @@ Your prompts never leave your machine. Only anonymous usage stats (tokens, laten
 ## CLI Commands
 
 ```bash
-relayplane-proxy                    # Start proxy (default port 3001)
+relayplane-proxy                    # Start proxy (default port 4801)
 relayplane-proxy stats              # View usage statistics
 relayplane-proxy telemetry off      # Disable telemetry
 relayplane-proxy telemetry status   # Check telemetry setting
