@@ -54,6 +54,9 @@ export interface TelemetryEvent {
   
   /** Timestamp */
   timestamp: string;
+
+  /** Original requested model (before routing) */
+  requested_model?: string;
 }
 
 /**
@@ -253,26 +256,38 @@ export function getLocalTelemetry(): TelemetryEvent[] {
 export function getTelemetryStats(): {
   totalEvents: number;
   totalCost: number;
-  byModel: Record<string, { count: number; cost: number }>;
+  baselineCost: number;
+  savings: number;
+  savingsPercent: number;
+  byModel: Record<string, { count: number; cost: number; baselineCost: number }>;
   byTaskType: Record<string, { count: number; cost: number }>;
   successRate: number;
 } {
   const events = getLocalTelemetry();
   
-  const byModel: Record<string, { count: number; cost: number }> = {};
+  // Default baseline model: what you'd be paying without RelayPlane
+  const BASELINE_MODEL = 'claude-opus-4-20250514';
+  
+  const byModel: Record<string, { count: number; cost: number; baselineCost: number }> = {};
   const byTaskType: Record<string, { count: number; cost: number }> = {};
   let totalCost = 0;
+  let totalBaselineCost = 0;
   let successCount = 0;
   
   for (const event of events) {
     totalCost += event.cost_usd;
     if (event.success) successCount++;
     
+    // Calculate what this request would have cost on the baseline model
+    const baselineForEvent = estimateCost(BASELINE_MODEL, event.tokens_in, event.tokens_out);
+    totalBaselineCost += baselineForEvent;
+    
     if (!byModel[event.model]) {
-      byModel[event.model] = { count: 0, cost: 0 };
+      byModel[event.model] = { count: 0, cost: 0, baselineCost: 0 };
     }
     byModel[event.model].count++;
     byModel[event.model].cost += event.cost_usd;
+    byModel[event.model].baselineCost += baselineForEvent;
     
     if (!byTaskType[event.task_type]) {
       byTaskType[event.task_type] = { count: 0, cost: 0 };
@@ -281,9 +296,15 @@ export function getTelemetryStats(): {
     byTaskType[event.task_type].cost += event.cost_usd;
   }
   
+  const savings = totalBaselineCost - totalCost;
+  const savingsPercent = totalBaselineCost > 0 ? (savings / totalBaselineCost) * 100 : 0;
+  
   return {
     totalEvents: events.length,
-    totalCost: Math.round(totalCost * 100) / 100,
+    totalCost: Math.round(totalCost * 10000) / 10000,
+    baselineCost: Math.round(totalBaselineCost * 10000) / 10000,
+    savings: Math.round(savings * 10000) / 10000,
+    savingsPercent: Math.round(savingsPercent * 10) / 10,
     byModel,
     byTaskType,
     successRate: events.length > 0 ? successCount / events.length : 0,

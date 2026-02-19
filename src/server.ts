@@ -49,7 +49,14 @@ import {
   type PolicySimulationRequest,
   type RoutingSimulationRequest,
 } from '@relayplane/explainability';
-import type { AuthEnforcementMode, ExecutionMode, AuthType } from '@relayplane/ledger';
+import type { AuthEnforcementMode, ExecutionMode, AuthType, LedgerStorage } from '@relayplane/ledger';
+import {
+  LearningEngine,
+  createLearningEngine,
+  type LearningEngineConfig,
+} from '@relayplane/learning-engine';
+import { RelayPlaneMiddleware } from './middleware.js';
+import { type RelayPlaneConfig, resolveConfig } from './relay-config.js';
 
 /**
  * Proxy server configuration
@@ -77,6 +84,12 @@ export interface ProxyServerConfig {
   providerManager?: ProviderManager;
   /** Enable capability-based routing (Phase 3) */
   enableRouting?: boolean;
+
+  // Learning Engine (Phase 5)
+  learningEngine?: LearningEngine;
+  /** Enable learning engine analytics and suggestions (default: false) */
+  enableLearning?: boolean;
+  learningConfig?: LearningEngineConfig;
 
   // Provider configuration (legacy, used when routing disabled)
   providers?: {
@@ -160,8 +173,9 @@ export class ProxyServer {
   private explainer: ExplanationEngine;
   private comparator: RunComparator;
   private simulator: Simulator;
+  private learningEngine: LearningEngine | null = null;
   private config: Required<
-    Pick<ProxyServerConfig, 'port' | 'host' | 'verbose' | 'defaultWorkspaceId' | 'defaultAgentId' | 'defaultAuthEnforcementMode' | 'enforcePolicies' | 'enableRouting'>
+    Pick<ProxyServerConfig, 'port' | 'host' | 'verbose' | 'defaultWorkspaceId' | 'defaultAgentId' | 'defaultAuthEnforcementMode' | 'enforcePolicies' | 'enableRouting' | 'enableLearning'>
   > &
     ProxyServerConfig;
 
@@ -175,6 +189,7 @@ export class ProxyServer {
       defaultAuthEnforcementMode: config.defaultAuthEnforcementMode ?? 'recommended',
       enforcePolicies: config.enforcePolicies ?? true,
       enableRouting: config.enableRouting ?? true,
+      enableLearning: config.enableLearning ?? false,
       ...config,
     };
 
@@ -224,6 +239,15 @@ export class ProxyServer {
       routingEngine: this.routingEngine,
       capabilityRegistry: this.capabilityRegistry,
     });
+
+    // Initialize learning engine (Phase 5)
+    if (this.config.enableLearning) {
+      this.learningEngine = config.learningEngine ?? createLearningEngine(
+        this.ledger.getStorage(),
+        undefined,
+        config.learningConfig,
+      );
+    }
 
     // Set API keys from config
     this.configureProviderApiKeys();
@@ -486,6 +510,57 @@ export class ProxyServer {
     if (url.pathname === '/v1/simulate/routing' && req.method === 'POST') {
       await this.handleSimulateRouting(req, res);
       return;
+    }
+
+    // ========================================================================
+    // Learning Engine API (Phase 5)
+    // ========================================================================
+
+    if (this.learningEngine) {
+      // GET /v1/analytics/summary
+      if (url.pathname === '/v1/analytics/summary' && req.method === 'GET') {
+        await this.handleAnalyticsSummary(req, res);
+        return;
+      }
+
+      // POST /v1/analytics/analyze
+      if (url.pathname === '/v1/analytics/analyze' && req.method === 'POST') {
+        await this.handleRunAnalysis(req, res);
+        return;
+      }
+
+      // GET /v1/suggestions
+      if (url.pathname === '/v1/suggestions' && req.method === 'GET') {
+        await this.handleListSuggestions(req, res);
+        return;
+      }
+
+      // POST /v1/suggestions/:id/approve
+      if (url.pathname.match(/^\/v1\/suggestions\/[^/]+\/approve$/) && req.method === 'POST') {
+        const id = url.pathname.split('/')[3];
+        await this.handleApproveSuggestion(req, res, id);
+        return;
+      }
+
+      // POST /v1/suggestions/:id/reject
+      if (url.pathname.match(/^\/v1\/suggestions\/[^/]+\/reject$/) && req.method === 'POST') {
+        const id = url.pathname.split('/')[3];
+        await this.handleRejectSuggestion(req, res, id);
+        return;
+      }
+
+      // GET /v1/rules
+      if (url.pathname === '/v1/rules' && req.method === 'GET') {
+        await this.handleListRules(req, res);
+        return;
+      }
+
+      // GET /v1/rules/:id/effectiveness
+      if (url.pathname.match(/^\/v1\/rules\/[^/]+\/effectiveness$/) && req.method === 'GET') {
+        const id = url.pathname.split('/')[3];
+        await this.handleRuleEffectiveness(res, id);
+        return;
+      }
     }
 
     // 404 for unknown routes
@@ -1246,6 +1321,114 @@ export class ProxyServer {
     res.end(JSON.stringify(error));
   }
 
+  // ============================================================================
+  // Learning Engine Handlers (Phase 5)
+  // ============================================================================
+
+  private async handleAnalyticsSummary(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    try {
+      const workspaceId = (req.headers['x-relayplane-workspace'] as string) ?? this.config.defaultWorkspaceId;
+      const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+      const from = url.searchParams.get('from') ?? new Date(Date.now() - 7 * 86400000).toISOString();
+      const to = url.searchParams.get('to') ?? new Date().toISOString();
+
+      const summary = await this.learningEngine!.getAnalyticsSummary({
+        workspace_id: workspaceId,
+        from,
+        to,
+      });
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ summary }));
+    } catch (err) {
+      this.sendError(res, 500, 'internal_error', err instanceof Error ? err.message : 'Unknown error');
+    }
+  }
+
+  private async handleRunAnalysis(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    try {
+      const workspaceId = (req.headers['x-relayplane-workspace'] as string) ?? this.config.defaultWorkspaceId;
+      const result = await this.learningEngine!.runAnalysis(workspaceId);
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
+    } catch (err) {
+      this.sendError(res, 500, 'internal_error', err instanceof Error ? err.message : 'Unknown error');
+    }
+  }
+
+  private async handleListSuggestions(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    try {
+      const workspaceId = (req.headers['x-relayplane-workspace'] as string) ?? this.config.defaultWorkspaceId;
+      const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+      const status = url.searchParams.get('status') as any;
+
+      const suggestions = await this.learningEngine!.listSuggestions({
+        workspace_id: workspaceId,
+        status: status || undefined,
+      });
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ suggestions }));
+    } catch (err) {
+      this.sendError(res, 500, 'internal_error', err instanceof Error ? err.message : 'Unknown error');
+    }
+  }
+
+  private async handleApproveSuggestion(req: http.IncomingMessage, res: http.ServerResponse, id: string): Promise<void> {
+    try {
+      const body = await this.readBody(req);
+      const parsed = body ? JSON.parse(body) : {};
+      const rule = await this.learningEngine!.approveSuggestion(id, {
+        user_id: parsed.user_id ?? 'system',
+      });
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ rule }));
+    } catch (err) {
+      this.sendError(res, 400, 'invalid_request', err instanceof Error ? err.message : 'Unknown error');
+    }
+  }
+
+  private async handleRejectSuggestion(req: http.IncomingMessage, res: http.ServerResponse, id: string): Promise<void> {
+    try {
+      const body = await this.readBody(req);
+      const parsed = body ? JSON.parse(body) : {};
+      await this.learningEngine!.rejectSuggestion(id, {
+        user_id: parsed.user_id ?? 'system',
+        reason: parsed.reason ?? 'Rejected via API',
+      });
+
+      res.writeHead(204);
+      res.end();
+    } catch (err) {
+      this.sendError(res, 400, 'invalid_request', err instanceof Error ? err.message : 'Unknown error');
+    }
+  }
+
+  private async handleListRules(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    try {
+      const workspaceId = (req.headers['x-relayplane-workspace'] as string) ?? this.config.defaultWorkspaceId;
+      const rules = await this.learningEngine!.listRules(workspaceId);
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ rules }));
+    } catch (err) {
+      this.sendError(res, 500, 'internal_error', err instanceof Error ? err.message : 'Unknown error');
+    }
+  }
+
+  private async handleRuleEffectiveness(res: http.ServerResponse, ruleId: string): Promise<void> {
+    try {
+      const effectiveness = await this.learningEngine!.getRuleEffectiveness(ruleId);
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ effectiveness }));
+    } catch (err) {
+      this.sendError(res, 500, 'internal_error', err instanceof Error ? err.message : 'Unknown error');
+    }
+  }
+
   /**
    * Log message
    */
@@ -1318,6 +1501,12 @@ export class ProxyServer {
   getSimulator(): Simulator {
     return this.simulator;
   }
+  /**
+   * Get the learning engine instance (Phase 5)
+   */
+  getLearningEngine(): LearningEngine | null {
+    return this.learningEngine;
+  }
 }
 
 /**
@@ -1325,4 +1514,21 @@ export class ProxyServer {
  */
 export function createProxyServer(config?: ProxyServerConfig): ProxyServer {
   return new ProxyServer(config);
+}
+
+/**
+ * Create a proxy server with optional circuit breaker middleware wrapping.
+ * This gives the advanced proxy the same circuit breaker protection as standalone.
+ */
+export function createSandboxedProxyServer(config?: ProxyServerConfig & {
+  relayplane?: Partial<RelayPlaneConfig>;
+}): { server: ProxyServer; middleware?: RelayPlaneMiddleware } {
+  const server = createProxyServer(config);
+
+  if (config?.relayplane?.enabled) {
+    const middleware = new RelayPlaneMiddleware(resolveConfig(config.relayplane));
+    return { server, middleware };
+  }
+
+  return { server };
 }

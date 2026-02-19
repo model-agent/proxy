@@ -59,9 +59,26 @@ export {
 } from './telemetry.js';
 export type { TelemetryEvent } from './telemetry.js';
 
+// Sandbox Architecture (v1.3.0+)
+export { CircuitBreaker, CircuitState } from './circuit-breaker.js';
+export { RelayPlaneMiddleware } from './middleware.js';
+export type { MiddlewareOptions } from './middleware.js';
+export { ProcessManager } from './process-manager.js';
+export { handleHealthRequest, probeHealth } from './health.js';
+export { StatsCollector } from './stats.js';
+export { StatusReporter } from './status.js';
+export type { ProxyStatus } from './status.js';
+export { resolveConfig } from './relay-config.js';
+export type { RelayPlaneConfig } from './relay-config.js';
+export { defaultLogger } from './logger.js';
+export type { Logger } from './logger.js';
+
+// Proxy stats collector (from standalone proxy)
+export { proxyStatsCollector } from './standalone-proxy.js';
+
 // Re-export core types
 export type { Provider, TaskType } from '@relayplane/core';
 
-// Note: Advanced features (ProxyServer, streaming, etc.) require additional
-// dependencies. Install @relayplane/ledger, @relayplane/auth-gate, etc.
-// for full functionality. See documentation for details.
+// Advanced proxy server (requires @relayplane/ledger, @relayplane/auth-gate, etc.)
+export { ProxyServer, createProxyServer, createSandboxedProxyServer } from './server.js';
+export type { ProxyServerConfig } from './server.js';

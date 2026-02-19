@@ -10,12 +10,15 @@
  * 
  * Commands:
  *   (default)              Start the proxy server
+ *   status                 Show proxy status (circuit state, stats, process info)
+ *   enable                 Enable RelayPlane in openclaw.json
+ *   disable                Disable RelayPlane in openclaw.json
  *   telemetry [on|off|status]  Manage telemetry settings
  *   stats                  Show usage statistics
  *   config                 Show configuration
  * 
  * Options:
- *   --port <number>    Port to listen on (default: 4801)
+ *   --port <number>    Port to listen on (default: 4100)
  *   --host <string>    Host to bind to (default: 127.0.0.1)
  *   --offline          Disable all network calls except LLM endpoints
  *   --audit            Show telemetry payloads before sending
@@ -52,7 +55,51 @@ import {
   getTelemetryPath,
 } from './telemetry.js';
 
-const VERSION = '0.2.1';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
+import { homedir } from 'os';
+
+let VERSION = '0.0.0';
+try {
+  const pkgPath = join(__dirname, '..', 'package.json');
+  const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+  VERSION = pkg.version ?? '0.0.0';
+} catch {
+  // fallback
+}
+
+/**
+ * Check npm registry for newer version (non-blocking, best-effort).
+ * Returns update message string or null.
+ */
+async function checkForUpdate(): Promise<string | null> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    const res = await fetch('https://registry.npmjs.org/@relayplane/proxy/latest', {
+      signal: controller.signal,
+      headers: { 'Accept': 'application/json' },
+    });
+    clearTimeout(timeout);
+    if (!res.ok) return null;
+    const data = await res.json() as { version?: string };
+    const latest = data.version;
+    if (!latest || latest === VERSION) return null;
+    // Simple semver compare: split and compare numerically
+    const cur = VERSION.split('.').map(Number);
+    const lat = latest.split('.').map(Number);
+    for (let i = 0; i < 3; i++) {
+      if ((lat[i] ?? 0) > (cur[i] ?? 0)) {
+        return `\n  ⬆️  Update available: v${VERSION} → v${latest}\n     Run: npm update -g @relayplane/proxy\n`;
+      }
+      if ((lat[i] ?? 0) < (cur[i] ?? 0)) return null;
+    }
+    return null;
+  } catch {
+    return null; // Network error, offline, etc. — silently skip
+  }
+}
 
 function printHelp(): void {
   console.log(`
@@ -64,12 +111,15 @@ Usage:
 
 Commands:
   (default)              Start the proxy server
+  status                 Show proxy status (circuit state, stats, process info)
+  enable                 Enable RelayPlane in openclaw.json
+  disable                Disable RelayPlane in openclaw.json
   telemetry [on|off|status]  Manage telemetry settings
   stats                  Show usage statistics
   config                 Show configuration
 
 Options:
-  --port <number>    Port to listen on (default: 4801)
+  --port <number>    Port to listen on (default: 4100)
   --host <string>    Host to bind to (default: 127.0.0.1)
   --offline          Disable all network calls except LLM endpoints
   --audit            Show telemetry payloads before sending
@@ -97,9 +147,8 @@ Example:
   # Disable telemetry completely
   npx @relayplane/proxy telemetry off
 
-  # Then point your SDKs to the proxy
-  export ANTHROPIC_BASE_URL=http://localhost:4801
-  export OPENAI_BASE_URL=http://localhost:4801
+  # Add to openclaw.json:
+  # { "relayplane": { "enabled": true } }
 
 Learn more: https://relayplane.com/docs
 `);
@@ -152,14 +201,23 @@ function handleStatsCommand(): void {
   console.log('═══════════════════');
   console.log('');
   console.log(`  Total requests: ${stats.totalEvents}`);
-  console.log(`  Total cost:     $${stats.totalCost.toFixed(2)}`);
+  console.log(`  Actual cost:    $${stats.totalCost.toFixed(4)}`);
+  console.log(`  Without RP:     $${stats.baselineCost.toFixed(4)}`);
+  if (stats.savings > 0) {
+    console.log(`  💰 You saved:   $${stats.savings.toFixed(4)} (${stats.savingsPercent.toFixed(1)}%)`);
+  } else if (stats.totalEvents > 0 && stats.baselineCost === 0) {
+    console.log(`  ⚠️  No token data yet — savings will appear after new requests`);
+  }
   console.log(`  Success rate:   ${(stats.successRate * 100).toFixed(1)}%`);
   console.log('');
   
   if (Object.keys(stats.byModel).length > 0) {
     console.log('  By Model:');
     for (const [model, data] of Object.entries(stats.byModel)) {
-      console.log(`    ${model}: ${data.count} requests, $${data.cost.toFixed(2)}`);
+      const savingsNote = data.baselineCost > 0
+        ? ` (saved $${(data.baselineCost - data.cost).toFixed(4)} vs Opus)`
+        : '';
+      console.log(`    ${model}: ${data.count} requests, $${data.cost.toFixed(4)}${savingsNote}`);
     }
     console.log('');
   }
@@ -167,7 +225,7 @@ function handleStatsCommand(): void {
   if (Object.keys(stats.byTaskType).length > 0) {
     console.log('  By Task Type:');
     for (const [taskType, data] of Object.entries(stats.byTaskType)) {
-      console.log(`    ${taskType}: ${data.count} requests, $${data.cost.toFixed(2)}`);
+      console.log(`    ${taskType}: ${data.count} requests, $${data.cost.toFixed(4)}`);
     }
     console.log('');
   }
@@ -176,6 +234,69 @@ function handleStatsCommand(): void {
     console.log('  No data yet. Start using the proxy to collect statistics.');
     console.log('');
   }
+}
+
+async function handleStatusCommand(): Promise<void> {
+  const { RelayPlaneMiddleware } = await import('./middleware.js');
+  const { resolveConfig } = await import('./relay-config.js');
+
+  const resolved = resolveConfig();
+  const middleware = new RelayPlaneMiddleware({ config: { ...resolved, autoStart: false } });
+
+  // Check if proxy is actually running by hitting /health
+  let proxyReachable = false;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2000);
+    const res = await fetch(`${resolved.proxyUrl}/health`, { signal: controller.signal });
+    clearTimeout(timeout);
+    proxyReachable = res.ok;
+  } catch {
+    // not running
+  }
+
+  console.log('');
+  console.log(middleware.formatStatus());
+  console.log('');
+  if (proxyReachable) {
+    console.log(`  🟢 Proxy is reachable at ${resolved.proxyUrl}`);
+  } else {
+    console.log(`  🔴 Proxy is not reachable at ${resolved.proxyUrl}`);
+  }
+  console.log('');
+
+  middleware.destroy();
+}
+
+function getOpenClawConfigPath(): string {
+  return join(homedir(), '.openclaw', 'openclaw.json');
+}
+
+function handleEnableDisableCommand(enable: boolean): void {
+  const configPath = getOpenClawConfigPath();
+  const dir = dirname(configPath);
+
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+
+  let config: Record<string, unknown> = {};
+  if (existsSync(configPath)) {
+    try {
+      config = JSON.parse(readFileSync(configPath, 'utf8'));
+    } catch {
+      // start fresh
+    }
+  }
+
+  if (!config.relayplane || typeof config.relayplane !== 'object') {
+    config.relayplane = {};
+  }
+  (config.relayplane as Record<string, unknown>).enabled = enable;
+
+  writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
+  console.log(`✅ RelayPlane ${enable ? 'enabled' : 'disabled'}`);
+  console.log(`   Updated ${configPath}`);
 }
 
 function handleConfigCommand(args: string[]): void {
@@ -237,8 +358,23 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
+  if (command === 'status') {
+    await handleStatusCommand();
+    process.exit(0);
+  }
+
+  if (command === 'enable') {
+    handleEnableDisableCommand(true);
+    process.exit(0);
+  }
+
+  if (command === 'disable') {
+    handleEnableDisableCommand(false);
+    process.exit(0);
+  }
+
   // Parse server options
-  let port = 4801;
+  let port = 4100;
   let host = '127.0.0.1';
   let verbose = false;
   let audit = false;
@@ -326,12 +462,18 @@ async function main(): Promise<void> {
     await startProxy({ port, host, verbose });
     
     console.log('');
-    console.log('  To use, set these environment variables:');
-    console.log(`    export ANTHROPIC_BASE_URL=http://${host}:${port}`);
-    console.log(`    export OPENAI_BASE_URL=http://${host}:${port}`);
+    console.log('  To use, add to your openclaw.json:');
+    console.log('    { "relayplane": { "enabled": true } }');
     console.log('');
     console.log('  Then run your agent (OpenClaw, Cursor, Aider, etc.)');
     console.log('');
+
+    // Non-blocking update check (fires after startup, doesn't delay anything)
+    if (!offline) {
+      checkForUpdate().then(msg => {
+        if (msg) console.log(msg);
+      });
+    }
   } catch (err) {
     console.error('Failed to start proxy:', err);
     process.exit(1);

@@ -27,6 +27,10 @@ import { RelayPlane, inferTaskType, getInferenceConfidence } from '@relayplane/c
 import type { Provider, TaskType } from '@relayplane/core';
 import { buildModelNotFoundError } from './utils/model-suggestions.js';
 import { recordTelemetry as recordCloudTelemetry, inferTaskType as inferTelemetryTaskType, estimateCost } from './telemetry.js';
+import { StatsCollector } from './stats.js';
+
+/** Shared stats collector instance for the proxy server */
+export const proxyStatsCollector = new StatsCollector();
 
 /**
  * Provider endpoint configuration
@@ -115,6 +119,7 @@ function sendCloudTelemetry(
   latencyMs: number,
   success: boolean,
   costUsd?: number,
+  requestedModel?: string,
 ): void {
   try {
     const cost = costUsd ?? estimateCost(model, tokensIn, tokensOut);
@@ -126,6 +131,7 @@ function sendCloudTelemetry(
       latency_ms: Math.round(latencyMs),
       success,
       cost_usd: cost,
+      requested_model: requestedModel,
     });
   } catch {
     // Telemetry should never break the proxy
@@ -404,6 +410,14 @@ function logRequest(
   if (escalated) {
     globalStats.escalations++;
   }
+
+  // Record to StatsCollector for sandbox architecture
+  proxyStatsCollector.recordRequest({
+    timestamp: Date.now(),
+    latencyMs,
+    viaProxy: true,
+    success,
+  });
 }
 
 const DEFAULT_PROXY_CONFIG: RelayPlaneProxyConfigFile = {
@@ -1502,10 +1516,17 @@ function convertAnthropicStreamEvent(
 
   switch (eventType) {
     case 'message_start': {
-      // First chunk: include role
+      // First chunk: include role and input token usage
       const msg = eventData['message'] as Record<string, unknown> | undefined;
       baseChunk.id = (msg?.['id'] as string) || messageId;
       choice.delta = { role: 'assistant', content: '' };
+      // Pass through input token count from message_start
+      const msgUsage = msg?.['usage'] as Record<string, unknown> | undefined;
+      if (msgUsage) {
+        (baseChunk as Record<string, unknown>)['usage'] = {
+          prompt_tokens: msgUsage['input_tokens'] ?? 0,
+        };
+      }
       return `data: ${JSON.stringify(baseChunk)}\n\n`;
     }
 
@@ -1569,9 +1590,10 @@ function convertAnthropicStreamEvent(
     }
 
     case 'message_delta': {
-      // Final chunk with stop reason
+      // Final chunk with stop reason and usage
       const delta = eventData['delta'] as Record<string, unknown> | undefined;
       const stopReason = delta?.['stop_reason'] as string | undefined;
+      const usage = eventData['usage'] as Record<string, unknown> | undefined;
       
       if (stopReason === 'tool_use') {
         choice.finish_reason = 'tool_calls';
@@ -1581,6 +1603,12 @@ function convertAnthropicStreamEvent(
         choice.finish_reason = stopReason || 'stop';
       }
       choice.delta = {};
+      // Pass through usage data (output_tokens from message_delta)
+      if (usage) {
+        (baseChunk as Record<string, unknown>)['usage'] = {
+          completion_tokens: usage['output_tokens'] ?? 0,
+        };
+      }
       return `data: ${JSON.stringify(baseChunk)}\n\n`;
     }
 
@@ -2049,6 +2077,13 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
     const url = req.url ?? '';
     const pathname = url.split('?')[0] ?? '';
 
+    // === Stats collector endpoint ===
+    if (req.method === 'GET' && pathname === '/status') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(proxyStatsCollector.getStats()));
+      return;
+    }
+
     // === Health endpoint ===
     if (req.method === 'GET' && (pathname === '/health' || pathname === '/healthz')) {
       const uptimeMs = Date.now() - globalStats.startedAt;
@@ -2445,18 +2480,50 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
               'Connection': 'keep-alive',
             });
             const reader = providerResponse.body?.getReader();
+            let streamTokensIn = 0;
+            let streamTokensOut = 0;
             if (reader) {
               const decoder = new TextDecoder();
+              let sseBuffer = '';
               try {
                 while (true) {
                   const { done, value } = await reader.read();
                   if (done) break;
-                  res.write(decoder.decode(value, { stream: true }));
+                  const chunk = decoder.decode(value, { stream: true });
+                  res.write(chunk);
+                  // Parse SSE events to extract usage from message_delta / message_stop
+                  sseBuffer += chunk;
+                  const lines = sseBuffer.split('\n');
+                  sseBuffer = lines.pop() ?? '';
+                  for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                      try {
+                        const evt = JSON.parse(line.slice(6));
+                        // Anthropic: message_delta has usage.output_tokens
+                        if (evt.type === 'message_delta' && evt.usage) {
+                          streamTokensOut = evt.usage.output_tokens ?? streamTokensOut;
+                        }
+                        // Anthropic: message_start has usage.input_tokens
+                        if (evt.type === 'message_start' && evt.message?.usage) {
+                          streamTokensIn = evt.message.usage.input_tokens ?? streamTokensIn;
+                        }
+                        // OpenAI format: choices with usage
+                        if (evt.usage) {
+                          streamTokensIn = evt.usage.prompt_tokens ?? evt.usage.input_tokens ?? streamTokensIn;
+                          streamTokensOut = evt.usage.completion_tokens ?? evt.usage.output_tokens ?? streamTokensOut;
+                        }
+                      } catch {
+                        // not JSON, skip
+                      }
+                    }
+                  }
                 }
               } finally {
                 reader.releaseLock();
               }
             }
+            // Store streaming token counts so telemetry can use them
+            nativeResponseData = { usage: { input_tokens: streamTokensIn, output_tokens: streamTokensOut } } as Record<string, unknown>;
             res.end();
           } else {
             nativeResponseData = await providerResponse.json() as Record<string, unknown>;
@@ -2487,7 +2554,7 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
           const usage = (nativeResponseData as any)?.usage;
           const tokensIn = usage?.input_tokens ?? usage?.prompt_tokens ?? 0;
           const tokensOut = usage?.output_tokens ?? usage?.completion_tokens ?? 0;
-          sendCloudTelemetry(taskType, targetModel || requestedModel, tokensIn, tokensOut, durationMs, true);
+          sendCloudTelemetry(taskType, targetModel || requestedModel, tokensIn, tokensOut, durationMs, true, undefined, originalModel ?? undefined);
         }
       } catch (err) {
         const durationMs = Date.now() - startTime;
@@ -2879,7 +2946,7 @@ export async function startProxy(config: ProxyConfig = {}): Promise<http.Server>
             const usage = (responseData as any)?.usage;
             const tokensIn = usage?.input_tokens ?? usage?.prompt_tokens ?? 0;
             const tokensOut = usage?.output_tokens ?? usage?.completion_tokens ?? 0;
-            sendCloudTelemetry(taskType, cascadeResult.model, tokensIn, tokensOut, durationMs, true);
+            sendCloudTelemetry(taskType, cascadeResult.model, tokensIn, tokensOut, durationMs, true, undefined, originalRequestedModel ?? undefined);
           }
 
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -3059,6 +3126,10 @@ async function handleStreamingRequest(
     'Connection': 'keep-alive',
   });
 
+  // Track token usage from streaming events
+  let streamTokensIn = 0;
+  let streamTokensOut = 0;
+
   try {
     // Stream the response based on provider format
     switch (targetProvider) {
@@ -3066,18 +3137,55 @@ async function handleStreamingRequest(
         // Convert Anthropic stream to OpenAI format
         for await (const chunk of convertAnthropicStream(providerResponse, targetModel)) {
           res.write(chunk);
+          // Parse OpenAI-format chunks for usage (emitted at end of stream)
+          try {
+            const lines = chunk.split('\n');
+            for (const line of lines) {
+              if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+                const evt = JSON.parse(line.slice(6));
+                if (evt.usage) {
+                  streamTokensIn = evt.usage.prompt_tokens ?? streamTokensIn;
+                  streamTokensOut = evt.usage.completion_tokens ?? streamTokensOut;
+                }
+              }
+            }
+          } catch { /* skip parse errors */ }
         }
         break;
       case 'google':
         // Convert Gemini stream to OpenAI format
         for await (const chunk of convertGeminiStream(providerResponse, targetModel)) {
           res.write(chunk);
+          try {
+            const lines = chunk.split('\n');
+            for (const line of lines) {
+              if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+                const evt = JSON.parse(line.slice(6));
+                if (evt.usage) {
+                  streamTokensIn = evt.usage.prompt_tokens ?? streamTokensIn;
+                  streamTokensOut = evt.usage.completion_tokens ?? streamTokensOut;
+                }
+              }
+            }
+          } catch { /* skip parse errors */ }
         }
         break;
       default:
         // xAI, Moonshot, OpenAI all use OpenAI-compatible streaming format
         for await (const chunk of pipeOpenAIStream(providerResponse)) {
           res.write(chunk);
+          try {
+            const lines = chunk.split('\n');
+            for (const line of lines) {
+              if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+                const evt = JSON.parse(line.slice(6));
+                if (evt.usage) {
+                  streamTokensIn = evt.usage.prompt_tokens ?? streamTokensIn;
+                  streamTokensOut = evt.usage.completion_tokens ?? streamTokensOut;
+                }
+              }
+            }
+          } catch { /* skip parse errors */ }
         }
     }
   } catch (err) {
@@ -3104,7 +3212,7 @@ async function handleStreamingRequest(
       .catch((err) => {
         log(`Failed to record run: ${err}`);
       });
-    sendCloudTelemetry(taskType, targetModel, 0, 0, durationMs, true);
+    sendCloudTelemetry(taskType, targetModel, streamTokensIn, streamTokensOut, durationMs, true, undefined, request.model ?? undefined);
   }
 
   res.end();
