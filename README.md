@@ -28,9 +28,9 @@ Every LLM request flows through RelayPlane. Cost per request, model used, task t
 
 A policy engine classifies each task and routes it to the most cost-effective model. Simple file reads → Haiku ($0.25/MTok). Complex architecture → Opus ($15/MTok). You set the rules or use defaults.
 
-### 3. Learn — Every agent makes yours smarter
+### 3. Learn — Every agent makes yours smarter *(coming soon)*
 
-Opt into the collective mesh. Anonymized routing outcomes from thousands of agents improve everyone's routing. The network gets smarter without you doing anything.
+Opt into the collective mesh. As more agents join, anonymized routing outcomes improve everyone's routing. The network gets smarter without you doing anything. This feature is in development — the infrastructure is built, and early contributors will benefit first when it goes live.
 
 ```bash
 # Enable mesh contribution (free, opt-in)
@@ -131,7 +131,7 @@ Free tier: nothing leaves your machine. Everything runs locally.
 | Tier | Price | What you get |
 |------|-------|-------------|
 | **Free** | $0 forever | Full proxy, dashboard, smart routing, policy engine |
-| **Contributor** | $0 forever | Share anonymized data, get mesh-enhanced routing |
+| **Contributor** | $0 forever | Share anonymized data, get mesh-enhanced routing (coming soon) |
 | **Pro** | $25/mo | Analytics, alerts, team features, private mesh |
 
 ## Links
