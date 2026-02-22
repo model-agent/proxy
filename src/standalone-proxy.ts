@@ -96,7 +96,11 @@ export const DEFAULT_ENDPOINTS: Record<string, ProviderEndpoint> = {
     baseUrl: 'https://api.perplexity.ai',
     apiKeyEnv: 'PERPLEXITY_API_KEY',
   },
-};
+  minimax: {
+    baseUrl: 'https://api.minimax.chat/v1',
+    apiKeyEnv: 'MINIMAX_API_KEY',
+  },
+} as typeof DEFAULT_ENDPOINTS;
 
 /**
  * Model to provider/model mapping
@@ -114,6 +118,11 @@ export const MODEL_MAPPING: Record<string, { provider: Provider; model: string }
   'gpt-4o': { provider: 'openai', model: 'gpt-4o' },
   'gpt-4o-mini': { provider: 'openai', model: 'gpt-4o-mini' },
   'gpt-4.1': { provider: 'openai', model: 'gpt-4.1' },
+  // MiniMax models
+  'MiniMax-M2.5': { provider: 'minimax' as Provider, model: 'MiniMax-M2.5' },
+  'minimax-m2.5': { provider: 'minimax' as Provider, model: 'MiniMax-M2.5' },
+  'MiniMax-M2': { provider: 'minimax' as Provider, model: 'MiniMax-M2' },
+  'minimax-m2': { provider: 'minimax' as Provider, model: 'MiniMax-M2' },
 };
 
 /**
@@ -1968,7 +1977,7 @@ function parsePreferredModel(
   if (!provider || !model) return null;
 
   // Validate provider
-  const validProviders: Provider[] = ['openai', 'anthropic', 'google', 'xai', 'openrouter', 'deepseek', 'groq', 'local'];
+  const validProviders: Provider[] = ['openai', 'anthropic', 'google', 'xai', 'openrouter', 'deepseek', 'groq', 'local', 'minimax' as Provider];
   if (!validProviders.includes(provider as Provider)) return null;
 
   return { provider: provider as Provider, model };
@@ -2036,7 +2045,7 @@ function resolveExplicitModel(
   // Provider-prefixed format: "anthropic/claude-3-5-sonnet-latest"
   if (modelName.includes('/')) {
     const [provider, model] = modelName.split('/');
-    const validProviders: Provider[] = ['openai', 'anthropic', 'google', 'xai', 'openrouter', 'deepseek', 'groq', 'local'];
+    const validProviders: Provider[] = ['openai', 'anthropic', 'google', 'xai', 'openrouter', 'deepseek', 'groq', 'local', 'minimax' as Provider];
     if (provider && model && validProviders.includes(provider as Provider)) {
       return { provider: provider as Provider, model };
     }
