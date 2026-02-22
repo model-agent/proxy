@@ -769,6 +769,33 @@ async function main(): Promise<void> {
   // Handle commands
   const command = args[0];
   
+  if (command === 'init') {
+    // Ensure config exists (loadConfig creates default if missing)
+    const config = loadConfig();
+    const configPath = getConfigPath();
+    console.log('');
+    console.log('✅ RelayPlane initialized');
+    console.log(`   Config: ${configPath}`);
+    console.log('');
+    console.log('Next steps:');
+    console.log('  1. Start the proxy:');
+    console.log('     relayplane start');
+    console.log('');
+    console.log('  2. Point your agent at the proxy:');
+    console.log('     export ANTHROPIC_BASE_URL=http://localhost:4100');
+    console.log('     export OPENAI_BASE_URL=http://localhost:4100');
+    console.log('');
+    console.log('  3. Check your costs:');
+    console.log('     relayplane stats');
+    console.log('');
+    process.exit(0);
+  }
+
+  if (command === 'start') {
+    // "relayplane start" just falls through to start the server
+    args.shift();
+  }
+
   if (command === 'telemetry') {
     handleTelemetryCommand(args.slice(1));
     process.exit(0);
