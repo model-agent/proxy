@@ -159,7 +159,7 @@ export function estimateCost(model: string, inputTokens: number, outputTokens: n
   const pricing = MODEL_PRICING[model] || MODEL_PRICING['default'];
   const inputCost = (inputTokens / 1_000_000) * pricing.input;
   const outputCost = (outputTokens / 1_000_000) * pricing.output;
-  return Math.round((inputCost + outputCost) * 10000) / 10000; // Round to 4 decimal places
+  return inputCost + outputCost; // Full precision — rounding happens at display time
 }
 
 /**
